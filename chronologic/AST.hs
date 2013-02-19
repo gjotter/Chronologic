@@ -16,7 +16,7 @@ data Binding = NameBind
 
 data MetaType a = Arrow (MetaType a) (MetaType a)
                 | Var VariableIndex
-                | Concrete a
+                | Constant a
                 deriving (Eq,Show)
 
 data Type = Type PrimitiveType TimeType
@@ -46,21 +46,21 @@ data Term = TmVar DeBruijn
           | TmAdd Term Term
           | TmIf Term Term Term
           | TmLet LetBind Term
-          | TmTime PTerm CTerm
+          | TmTime PrimitiveTerm TimeTerm
           deriving (Eq,Show)
 
-data PTerm = TmBool Bool
-           | TmInt Int
-           deriving (Eq,Show)
+data PrimitiveTerm = TmBool Bool
+                   | TmInt Int
+                   deriving (Eq,Show)
 
-data CTerm = CTmOffset Offset
+data TimeTerm = TmOffset Offset
     deriving (Eq,Show)
 
 mapTyC :: (TimeType -> TimeType) -> MetaType Type -> MetaType Type
 mapTyC f t =
     case t of
         Arrow t1 t2           -> Arrow (f `mapTyC` t1) (f `mapTyC` t2)
-        Concrete (Type pt tt) -> Concrete $ Type pt (f tt)
+        Constant (Type pt tt) -> Constant $ Type pt (f tt)
         Var v                 -> Var v
 
 emptyContext = []
@@ -88,6 +88,6 @@ isInContext' vi (_,bind) =
     where
         contains t vi = case t of 
             Arrow t1 t2 -> t1 `contains` vi || t2 `contains` vi
-            Concrete _   -> False
+            Constant _   -> False
             Var vi'     -> vi' == vi
 

@@ -43,29 +43,29 @@ class Eq a => Substitutable z a where
 instance Substitutable TimeRecord TimeType where
     add x tr = tr { timeSubs = x : (timeSubs tr) }
     apply f tr = tr { timeSubs = f $ timeSubs tr }
-    match (Concrete x) (Concrete y) tr = let maysub = matchConcreteType x y
+    match (Constant x) (Constant y) tr = let maysub = matchConstantType x y
                                          in case maysub of
                                                 Just z -> tr { timeVars = z : (timeVars tr)}
                                                 Nothing -> tr
         where 
-            matchConcreteType (TimeBound i1 o1) (TimeBound i2 o2) 
+            matchConstantType (TimeBound i1 o1) (TimeBound i2 o2) 
                 | i1 == i2  = Nothing
                 | otherwise = Just (TimeBound i1 o1,TimeBound i2 o2)
      
-            matchConcreteType (TimeLiteral o1 ) (TimeLiteral o2 ) 
+            matchConstantType (TimeLiteral o1 ) (TimeLiteral o2 ) 
                 | o1 == o2  = Nothing 
                 | otherwise = error "cannot unify literals o1 o2"
     
-            matchConcreteType t1@(TimeBound i1 o1) t2@(TimeLiteral o2 ) = Just (t2,t1)
+            matchConstantType t1@(TimeBound i1 o1) t2@(TimeLiteral o2 ) = Just (t2,t1)
    
-            matchConcreteType t1@(TimeLiteral o1 ) t2@(TimeBound i2 o2) = matchConcreteType t2 t1
-            matchConcreteType _                 _                       = error "placeholder"
+            matchConstantType t1@(TimeLiteral o1 ) t2@(TimeBound i2 o2) = matchConstantType t2 t1
+            matchConstantType _                 _                       = error "placeholder"
     
 
 instance Substitutable PrimitiveRecord PrimitiveType where
     add x (PrimitiveRecord xs) = PrimitiveRecord (x:xs)
     apply f (PrimitiveRecord xs) = PrimitiveRecord $ f xs
-    match (Concrete x) (Concrete y) tr 
+    match (Constant x) (Constant y) tr 
         | x == y = tr
         | otherwise = error "x /= y"
 
@@ -84,7 +84,7 @@ tmap f (t1,t2) = (f t1,f t2)
 transformMetaType :: (a -> b) -> MetaType a -> MetaType b
 transformMetaType f (Arrow t1 t2) = Arrow (transformMetaType f t1) (transformMetaType f t2)
 transformMetaType f (Var i)       = Var i
-transformMetaType f (Concrete t)  = Concrete $ f t
+transformMetaType f (Constant t)  = Constant $ f t
 
 emptyState = TypeState [] [] [] 0 0
 
@@ -197,7 +197,7 @@ merge = zipWith (ftuple merge')
             | x == y = Var x
             | otherwise = error "Var x /= Var y in merging types"
         merge' (Arrow x1 x2) (Arrow y1 y2) = Arrow (merge' x1 y1) (merge' x2 y2)
-        merge' (Concrete x) (Concrete y) = Concrete $ Type x y
+        merge' (Constant x) (Constant y) = Constant $ Type x y
         merge' x y = error $ "merging " ++ show x ++ " and " ++ show y
 
 splitLiterals = partition isBoundTimeVar
@@ -210,7 +210,7 @@ splitLiterals = partition isBoundTimeVar
 unify :: (Show a, Substitutable z a) => [Constraint a] -> z -> z
 unify [] r = id r
 unify (c:cs) r = case c of
-    (Concrete t1, Concrete t2)      -> unify cs $ match (Concrete t1) (Concrete t2) r
+    (Constant t1, Constant t2)      -> unify cs $ match (Constant t1) (Constant t2) r
     (Arrow s1 s2, Arrow t1 t2)      -> unify ((s1,t1) : (s2,t2) : cs) r
     (tyS@(Var idS), tyT      ) 
         | tyS == tyT                ->  unify cs r
@@ -225,7 +225,7 @@ unify (c:cs) r = case c of
 isFVIn id ty = case ty of
     Arrow t1 t2   -> isFVIn id t1 || isFVIn id t2
     Var id'       -> id' == id
-    Concrete _    -> False
+    Constant _    -> False
 
 
 filterOutputs = uncurry (++) . filterOutputs' . unzip
@@ -243,7 +243,7 @@ filterOutput t =
     case t of 
         Arrow x y  -> filterOutput y
         Var _      -> Nothing
-        Concrete x -> Just x
+        Constant x -> Just x
 
 constraints :: Term -> State TypeState (MetaType Type)
 constraints tm = case tm of
@@ -292,7 +292,7 @@ constraints tm = case tm of
 
     TmTime ptm ctm -> 
         do  nv <- freshTypeVar
-            let ct = Concrete $ Type (typePTerm ptm) (typeCTerm ctm)
+            let ct = Constant $ Type (typePTerm ptm) (typeCTerm ctm)
             addTypeConstraints [(nv,ct)]
             return nv
 
@@ -306,11 +306,11 @@ bindType t = case t of
     Arrow t1 t2                     ->  do  ty1 <- bindType t1
                                             ty2 <- bindType t2
                                             return $ Arrow ty1 ty2
-    Concrete (Type pt tt)           -> case tt of
+    Constant (Type pt tt)           -> case tt of
         TimeUnbound db o ->  
             do  ty <- context2Type db
                 case ty of 
-                    (Var i) -> return $ Concrete $ Type pt $ TimeBound i o
+                    (Var i) -> return $ Constant $ Type pt $ TimeBound i o
                     _       -> error "cant bind time to non-variable"
 
         _           ->  return t
@@ -359,7 +359,7 @@ instantiatePoly t replaced =
         Arrow t1 t2   ->  do  (ty1,tr1) <- instantiatePoly t1 replaced
                               (ty2,tr2) <- instantiatePoly t2 (replaced ++ tr1)
                               return (Arrow ty1 ty2,tr1++tr2)
-        Concrete (Type pt tt) -> 
+        Constant (Type pt tt) -> 
             case tt of
                 TimeBound i o -> instantiateTimeType i o pt replaced
                 _               -> return (t,[])
@@ -379,28 +379,28 @@ instantiatePoly t replaced =
 instantiateTimeType b o pt replaced = 
     do  let replacement = lookup (Var b) replaced
         case replacement of
-            Just (Var i) -> return (Concrete $ Type pt $ (TimeBound i o) , [])
+            Just (Var i) -> return (Constant $ Type pt $ (TimeBound i o) , [])
             Nothing        -> do  sv <- simpleTimeVar
-                                  let t'      = Concrete $ Type pt (TimeBound sv o)
+                                  let t'      = Constant $ Type pt (TimeBound sv o)
                                       replace = (Var b, Var sv)
                                   return (t', [replace]) 
 
 typePTerm (TmBool _)    = TyBool
 typePTerm (TmInt _)     = TyInt
 
-typeCTerm (CTmOffset o) = TimeLiteral o
+typeCTerm (TmOffset o) = TimeLiteral o
 
-b0 = TmTime (TmBool True) (CTmOffset 0)
-b1 = TmTime (TmBool True) (CTmOffset 1)
+b0 = TmTime (TmBool True) (TmOffset 0)
+b1 = TmTime (TmBool True) (TmOffset 1)
 
 delay = TmTAbs "n" $ TmAs (TmAbs "x" (TmVar 0)) $ 
-        Arrow (Concrete $ Type TyBool (TimeUnbound 1 0)) 
-        (Concrete $ Type TyBool (TimeUnbound 1 1))
+        Arrow (Constant $ Type TyBool (TimeUnbound 1 0)) 
+        (Constant $ Type TyBool (TimeUnbound 1 1))
 
 f = TmTAbs "n" $ TmAs (TmAbs "x" $ TmAbs "y" (TmVar 0)) $ 
-        Arrow (Concrete $ Type TyBool (TimeUnbound 2 0)) 
-        (Arrow (Concrete $ Type TyBool (TimeUnbound 2 1)) 
-        (Concrete $ Type TyBool (TimeUnbound 2 2)))
+        Arrow (Constant $ Type TyBool (TimeUnbound 2 0)) 
+        (Arrow (Constant $ Type TyBool (TimeUnbound 2 1)) 
+        (Constant $ Type TyBool (TimeUnbound 2 2)))
 
 g = (TmApp (TmApp f (TmApp delay b0)) (TmApp delay b0))
 h = (TmApp (TmApp f (TmApp delay b0)) b0)
