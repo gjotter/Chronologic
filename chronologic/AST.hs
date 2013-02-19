@@ -56,16 +56,6 @@ data PTerm = TmBool Bool
 data CTerm = CTmOffset Offset
     deriving (Eq,Show)
 
-type2Time :: Type -> TimeType 
-type2Time (Type pt tt) = tt
-
-mapConcrete :: (a -> a) -> MetaType a -> MetaType a
-mapConcrete f t =
-    case t of
-        Arrow t1 t2 -> Arrow (f `mapConcrete` t1) (f `mapConcrete` t2)
-        Concrete x  -> Concrete $ f x
-        Var v       -> Var v
-
 mapTyC :: (TimeType -> TimeType) -> MetaType Type -> MetaType Type
 mapTyC f t =
     case t of
@@ -100,67 +90,4 @@ isInContext' vi (_,bind) =
             Arrow t1 t2 -> t1 `contains` vi || t2 `contains` vi
             Concrete _   -> False
             Var vi'     -> vi' == vi
-
-printMetaType :: Show a => Context -> MetaType a -> String
-printMetaType ctx t = case t of
-    Arrow t1 t2   -> " (" ++ printMetaType ctx t1 ++ " -> " ++ printMetaType ctx t2 ++ ") "
-    Var db        -> "(" ++ "TyVar " ++ show db ++ ")"
-    Concrete a    -> show a
-
-printType ctx (Type pt ct) = printPrimitiveType pt ++ printTimeType ctx ct 
-
-printPrimitiveType :: PrimitiveType -> String
-printPrimitiveType TyBool = "Bool"
-printPrimitiveType TyInt  = "Int"
-
-printTimeType ctx (TimeUnbound n i) = 
-        "<" ++ (fst $ index2name ctx n) ++ " + " ++ show i ++ ">"
-
-printTimeType ctx (TimeBound i o  ) = "<" ++ (fst $ index2name ctx i) ++ show o ++ ">"
-printTimeType ctx (TimeLiteral o  ) = "<" ++ show o ++ ">"
-
-printTerm :: Context -> Term -> String
-printTerm ctx t = case t of
-    TmAbs x t1      ->  let (ctx',x') = pickFreshName ctx x 
-                        in "(lam " ++ x' ++ ". " ++ printTerm ctx' t1 ++ ")"
-    TmTAbs x t1     ->  let (ctx',x') = pickFreshName ctx x 
-                        in "(lam " ++ x' ++ ". " ++ printTerm ctx' t1 ++ ")"
-    TmApp t1 t2     ->  "(" ++ printTerm ctx t1 ++ " " ++ printTerm ctx t2 ++ ")"
-    TmVar n         ->  fst $ index2name ctx n
-    TmAdd t1 t2     ->  "(" ++ printTerm ctx t1 ++ " + " ++ printTerm ctx t2 ++ ")"
-    TmIf t1 t2 t3 
-                    ->  "( if (" ++ printTerm ctx t1 ++ ") then (" 
-                        ++ printTerm ctx t2 ++ ") else (" 
-                        ++ printTerm ctx t3 ++ "))"
-    TmAs tm ty      ->  "( " ++ printTerm ctx tm ++ " : " ++ printMetaType ctx ty ++ " )"
-    TmLet lb tm     ->  let (ctx',str) = printLetBind ctx lb 
-                        in "( let (" ++ str ++ ") in " ++ printTerm ctx' tm ++ ")"
-    TmTime t c     ->  printPTerm t ++ printCTerm c
-
-printLetBind ctx []       = (ctx, [])
-printLetBind ctx (lb:lbs) =  
-    let (ctx',str) = printLetBind' ctx lb 
-        (ctx'',str') = printLetBind ctx' lbs
-    in  (ctx'',str ++ ", " ++ str')
-
-printLetBind' :: Context -> (String,Term) -> (Context,String)
-printLetBind' ctx (str,tm) = 
-    let (ctx',tm')  = pickFreshName ctx str
-        str'        = tm' ++ " = " ++ printTerm ctx tm
-    in  (ctx',str')
-
-printPTerm (TmBool t) = show t
-printPTerm (TmInt  t) = show t 
-
-printCTerm (CTmOffset o) = "<" ++ show o ++ ">"
-
-pickFreshName ctx x = pickFreshName' ctx x 0
-pickFreshName' ctx x n = 
-    case y of 
-        Just z  -> pickFreshName' ctx x (n+1)
-        Nothing -> (ctx',x')
-        where 
-            y    = lookup x' ctx
-            x'   = x ++ (show n)
-            ctx' = (x',NameBind) : ctx
 
