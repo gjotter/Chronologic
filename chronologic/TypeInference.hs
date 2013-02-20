@@ -85,7 +85,7 @@ transformMetaType f (Arrow t1 t2) = Arrow (transformMetaType f t1) (transformMet
 transformMetaType f (Var i)       = Var i
 transformMetaType f (Constant t)  = Constant $ f t
 
-emptyState = TypeState [] [] [] 0 0
+emptyState = TypeState (Context [] [] []) [] [] 0 0
 
 simpleTimeVar :: State TypeState Int
 simpleTimeVar = 
@@ -111,20 +111,30 @@ freshTimeVar =
         modify (\s -> s { uniqueTimeVar = (i+1) })
         return $ Var i
 
-index2Name :: Int -> State TypeState (String,Binding)
-index2Name i = 
+deBruijn2Var :: (Show a, Show b) => (Context -> [(a,b)]) -> Int -> State TypeState b
+deBruijn2Var f i = 
     do  ctx <- gets context
-        return $ ctx !! i
+        return $ snd (index2name (f ctx) i)
 
-context2BoundedType :: DeBruijn -> State TypeState (MetaType BoundedType)
-context2BoundedType db =
+addTypeVarBinding :: TypeVarBinding -> State TypeState ()
+addTypeVarBinding c = 
     do  ctx <- gets context
-        return $ ctx2Type ctx db
-            
-addContextBinding :: (String,Binding) -> State TypeState ()
-addContextBinding c = 
+        let ctx' = ctx { typeVarBind = c : (typeVarBind ctx) }
+        modify (\s -> s { context = ctx' })
+
+addSchemeBinding :: SchemeBinding -> State TypeState ()
+addSchemeBinding c = 
     do  ctx <- gets context
-        modify (\s -> s { context = c : ctx })
+        let ctx' = ctx { schemeBind = c : schemeBind ctx }
+        modify (\s -> s { context = ctx' })
+
+addTimeVarBinding :: TimeVarBinding -> State TypeState ()
+addTimeVarBinding c = 
+    do  ctx <- gets context
+        let ctx' = ctx { timeVarBind = c : timeVarBind ctx }
+        modify (\s -> s { context = ctx' })
+
+
 
 addTypeConstraints :: [Constraint BoundedType] -> State TypeState ()
 addTypeConstraints c =
@@ -249,7 +259,7 @@ constraints tm = case tm of
 
     TmAbs str tm ->
         do  nvlam <- freshTypeVar
-            addContextBinding (str,TyVarBind nvlam)
+            addTypeVarBinding (str,nvlam)
             nvtot <- freshTypeVar
             ty <- constraints tm
             addTypeConstraints [(nvtot,Arrow nvlam ty)]
@@ -257,7 +267,7 @@ constraints tm = case tm of
  
     TmTAbs str tm ->
         do  nv <- freshTimeVar
-            addContextBinding (str,TyVarBind nv)
+            addTimeVarBinding (str,nv)
             constraints tm 
 
     TmApp t1 t2 ->
@@ -281,10 +291,18 @@ constraints tm = case tm of
             addTypeConstraints [(nv,ty2)]
             return nv
 
-    TmVar k -> 
-        do  ty <- var2Type k 
+    TmTypeVar k -> 
+        do  ty <- deBruijn2Var typeVarBind k
             return ty
-    
+
+    TmTimeVar k ->
+        do  ti <- deBruijn2Var timeVarBind k
+            return ti
+             
+    TmSchemeVar k ->
+        do  sch <- deBruijn2Var schemeBind k
+            liftM fst $ instantiatePoly sch [] 
+
     TmLet lb tm ->
         do  mapM constrainLet lb 
             constraints tm
@@ -301,13 +319,13 @@ constraints tm = case tm of
 -- to the actual time quantifier used
 bindType :: MetaType UnboundedType -> State TypeState (MetaType BoundedType)
 bindType t = case t of
-    Var db                          -> context2BoundedType db 
+    Var db                          ->  deBruijn2Var timeVarBind db 
     Arrow t1 t2                     ->  do  ty1 <- bindType t1
                                             ty2 <- bindType t2
                                             return $ Arrow ty1 ty2
     Constant (UnboundedType pt tt)    -> case tt of
         UnboundedTime db o ->  
-            do  ty <- context2BoundedType db
+            do  ty <- deBruijn2Var timeVarBind db
                 case ty of 
                     (Var i) -> return $ Constant $ BoundedType pt $ BoundedTime i o
                     _       -> error "cant bind time to non-variable"
@@ -330,17 +348,8 @@ constrainLet (str,tm) =
         modify (\s -> s { uniqueTypeVar = uniqueTypeVar ts' })
         modify (\s -> s { timeconstraints = tc ++ tc' })
         case princty of 
-                Just t  -> addContextBinding (str,TyScheme t)
+                Just t  -> addSchemeBinding (str,t)
                 Nothing -> error "looked up invalid binder in let"
-
--- Lookup the type the variable is refering to.
--- In case this is a typescheme we first need to create a specific instance for 
--- the typescheme, since it could be polymorphic
-var2Type k = 
-    do  (_,bind) <- index2Name k
-        case bind of 
-            TyScheme t  -> liftM fst $ instantiatePoly t []
-            _           -> context2BoundedType k
 
 -- Instantiating a polymorphic type into a specifc type involves
 -- changing all free variables in new variables that can be bound to a specific
@@ -365,7 +374,7 @@ instantiatePoly t replaced =
         Var k ->  
             do  let r = lookup t replaced
                 ctx <- gets context
-                if isInContext ctx k 
+                if isInContext k $ typeVarBind ctx
                     then return (t,[])
                     else case r of
                             Just v  ->  return (v,[])
@@ -389,14 +398,14 @@ typeCTerm (TmOffset o) = TimeLiteral o
 b0 = TmTime (TmBool True) (TmOffset 0)
 b1 = TmTime (TmBool True) (TmOffset 1)
 
-delay = TmTAbs "n" $ TmAs (TmAbs "x" (TmVar 0)) $ 
-        Arrow (Constant $ UnboundedType TyBool (UnboundedTime 1 0)) 
-        (Constant $ UnboundedType TyBool (UnboundedTime 1 1))
+delay = TmTAbs "n" $ TmAs (TmAbs "x" (TmTypeVar 0)) $ 
+        Arrow (Constant $ UnboundedType TyBool (UnboundedTime 0 0)) 
+        (Constant $ UnboundedType TyBool (UnboundedTime 0 1))
 
-f = TmTAbs "n" $ TmAs (TmAbs "x" $ TmAbs "y" (TmVar 0)) $ 
-        Arrow (Constant $ UnboundedType TyBool (UnboundedTime 2 0)) 
-        (Arrow (Constant $ UnboundedType TyBool (UnboundedTime 2 1)) 
-        (Constant $ UnboundedType TyBool (UnboundedTime 2 2)))
+f = TmTAbs "n" $ TmAs (TmAbs "x" $ TmAbs "y" (TmTypeVar 0)) $ 
+        Arrow (Constant $ UnboundedType TyBool (UnboundedTime 0 0)) 
+        (Arrow (Constant $ UnboundedType TyBool (UnboundedTime 0 1)) 
+        (Constant $ UnboundedType TyBool (UnboundedTime 0 2)))
 
 g = (TmApp (TmApp f (TmApp delay b0)) (TmApp delay b0))
 h = (TmApp (TmApp f (TmApp delay b0)) b0)

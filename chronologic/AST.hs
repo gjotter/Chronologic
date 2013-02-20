@@ -5,16 +5,19 @@ module AST
 import Control.Applicative
 import Data.SBV
 
-type Context = [(String,Binding)]
+data Context = Context 
+             { timeVarBind  :: [TimeVarBinding]
+             , typeVarBind  :: [TypeVarBinding]
+             , schemeBind   :: [SchemeBinding]
+             }
+
 type LetBind = [(String,Term)]
 type AtUnbound  = [(UnboundedTime,Term)]
 type AtBound    = [(BoundedTime,Term)]
 
-data Binding = NameBind
-             | VarBind (MetaType BoundedType)
-             | TyVarBind (MetaType BoundedType)
-             | TyScheme (MetaType BoundedType)
-             deriving Show
+type TimeVarBinding = (String,MetaType BoundedType)
+type TypeVarBinding = (String,MetaType BoundedType)
+type SchemeBinding  = (String,MetaType BoundedType)
 
 data MetaType a = Arrow (MetaType a) (MetaType a)
                 | Var VariableIndex
@@ -45,7 +48,9 @@ type VariableIndex = Int
 type DeBruijn = Int
 type Offset = SInteger
 
-data Term = TmVar DeBruijn 
+data Term = TmTypeVar DeBruijn 
+          | TmSchemeVar DeBruijn
+          | TmTimeVar DeBruijn
           | TmAbs String Term
           | TmTAbs String Term
           | TmApp Term Term  
@@ -55,6 +60,8 @@ data Term = TmVar DeBruijn
           | TmLet LetBind Term
           | TmAt TmAt
           | TmTime PrimitiveTerm TimeTerm
+          | TmReset
+          | TmClock
           deriving (Eq,Show)
 
 data TmAt = TmAtBound AtBound
@@ -77,29 +84,31 @@ mapTyC f t =
 
 emptyContext = []
 
-ctx2Type :: Context -> DeBruijn -> MetaType BoundedType
-ctx2Type ctx db = 
-    let (_,bind) = index2name ctx db
-    in case bind of
-        TyScheme t  -> t
-        VarBind t   -> t
-        TyVarBind t -> t
-        _           -> error "looked up invalid binder"
+ctx2TypeScheme :: Context -> DeBruijn -> MetaType BoundedType
+ctx2TypeScheme ctx db = 
+    let (_,bind) = index2name (schemeBind ctx) db
+    in  bind
 
-index2name = (!!)
+ctx2TypeVar :: Context -> DeBruijn -> MetaType BoundedType
+ctx2TypeVar ctx db = 
+    let (_,bind) = index2name (typeVarBind ctx) db
+    in  bind
+
+ctx2TimeVar :: Context -> DeBruijn -> MetaType BoundedType
+ctx2TimeVar ctx db = 
+    let (_,bind) = index2name (timeVarBind ctx) db
+    in  bind
+
+index2name xs l | length xs >= l = xs !! l
+                | otherwise      = error $ show xs ++ " with index " ++ show l
 
 
-isInContext ct t = foldl (||) False $ map (isInContext' t) ct
-
-isInContext' :: VariableIndex -> (String,Binding) -> Bool
-isInContext' vi (_,bind) = 
-    case bind of
-        TyScheme _  -> False
-        VarBind s   -> s `contains` vi
-        TyVarBind s -> s `contains` vi
+isInContext :: VariableIndex -> [(String,MetaType BoundedType)] -> Bool
+isInContext vi = let f (_,bind) = bind `contains` vi
+                 in foldl (||) True . map f
     where
         contains t vi = case t of 
             Arrow t1 t2 -> t1 `contains` vi || t2 `contains` vi
-            Constant _   -> False
+            Constant _  -> False
             Var vi'     -> vi' == vi
 
