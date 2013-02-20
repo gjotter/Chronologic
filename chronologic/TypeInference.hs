@@ -13,18 +13,18 @@ import qualified Data.IntervalMap.Interval as I
 type Constraint a = (MetaType a, MetaType a)
 type Substitution a = (MetaType a, MetaType a)
 
-instance Ord TimeType where
-    (TimeBound i11 o11) <= (TimeBound i21 o21)
+instance Ord BoundedTime where
+    (BoundedTime i11 o11) <= (BoundedTime i21 o21)
         | i11 > i21 = False
         | otherwise = True
-    (TimeBound _ _) <= (TimeLiteral _) = True
-    (TimeLiteral _) <= (TimeBound _ _) = False
+    (BoundedTime _ _) <= (TimeLiteral _) = True
+    (TimeLiteral _) <= (BoundedTime _ _) = False
     t1 <= t2 = error $ show t1 ++ " <= " ++ show t2
         
 data TypeState = TypeState
                { context            :: Context
-               , typeconstraints    :: [Constraint BoundType]
-               , timeconstraints    :: [(TimeType,TimeType)]
+               , typeconstraints    :: [Constraint BoundedType]
+               , timeconstraints    :: [(BoundedTime,BoundedTime)]
                , uniqueTypeVar      :: VariableIndex
                , uniqueTimeVar      :: VariableIndex
                }
@@ -32,15 +32,15 @@ data TypeState = TypeState
 data PrimitiveRecord = PrimitiveRecord [Substitution PrimitiveType]
 
 data TimeRecord = TimeRecord 
-                { timeSubs :: [Substitution TimeType]
-                , timeVars :: [(TimeType,TimeType)] }
+                { timeSubs :: [Substitution BoundedTime]
+                , timeVars :: [(BoundedTime,BoundedTime)] }
 
 class Eq a => Substitutable z a where
     add :: Substitution a -> z -> z
     apply :: ([Substitution a] -> [Substitution a]) -> z -> z 
     match :: MetaType a -> MetaType a -> z -> z 
 
-instance Substitutable TimeRecord TimeType where
+instance Substitutable TimeRecord BoundedTime where
     add x tr = tr { timeSubs = x : (timeSubs tr) }
     apply f tr = tr { timeSubs = f $ timeSubs tr }
     match (Constant x) (Constant y) tr = let maysub = matchConstantType x y
@@ -48,17 +48,17 @@ instance Substitutable TimeRecord TimeType where
                                                 Just z -> tr { timeVars = z : (timeVars tr)}
                                                 Nothing -> tr
         where 
-            matchConstantType (TimeBound i1 o1) (TimeBound i2 o2) 
+            matchConstantType (BoundedTime i1 o1) (BoundedTime i2 o2) 
                 | i1 == i2  = Nothing
-                | otherwise = Just (TimeBound i1 o1,TimeBound i2 o2)
+                | otherwise = Just (BoundedTime i1 o1,BoundedTime i2 o2)
      
             matchConstantType (TimeLiteral o1 ) (TimeLiteral o2 ) 
                 | o1 == o2  = Nothing 
                 | otherwise = error "cannot unify literals o1 o2"
     
-            matchConstantType t1@(TimeBound i1 o1) t2@(TimeLiteral o2 ) = Just (t2,t1)
+            matchConstantType t1@(BoundedTime i1 o1) t2@(TimeLiteral o2 ) = Just (t2,t1)
    
-            matchConstantType t1@(TimeLiteral o1 ) t2@(TimeBound i2 o2) = matchConstantType t2 t1
+            matchConstantType t1@(TimeLiteral o1 ) t2@(BoundedTime i2 o2) = matchConstantType t2 t1
     
 
 instance Substitutable PrimitiveRecord PrimitiveType where
@@ -116,8 +116,8 @@ index2Name i =
     do  ctx <- gets context
         return $ ctx !! i
 
-context2BoundType :: DeBruijn -> State TypeState (MetaType BoundType)
-context2BoundType db =
+context2BoundedType :: DeBruijn -> State TypeState (MetaType BoundedType)
+context2BoundedType db =
     do  ctx <- gets context
         return $ ctx2Type ctx db
             
@@ -126,16 +126,16 @@ addContextBinding c =
     do  ctx <- gets context
         modify (\s -> s { context = c : ctx })
 
-addTypeConstraints :: [Constraint BoundType] -> State TypeState ()
+addTypeConstraints :: [Constraint BoundedType] -> State TypeState ()
 addTypeConstraints c =
     do  constr <- gets typeconstraints
         modify (\s -> s { typeconstraints = c ++ constr })
 
-selectPrimitive :: BoundType -> PrimitiveType
-selectPrimitive (BoundType pr _) = pr
+selectPrimitive :: BoundedType -> PrimitiveType
+selectPrimitive (BoundedType pr _) = pr
 
-selectTimeType :: BoundType -> TimeType
-selectTimeType (BoundType _ tt) = tt
+selectBoundedTime :: BoundedType -> BoundedTime
+selectBoundedTime (BoundedType _ tt) = tt
 
 printTypeMap cs = 
     do  s <- typecheck cs
@@ -146,7 +146,7 @@ printTimeSat = (liftM fst) . typecheck
 typecheck cs = 
     do  let subs f e              = unify (map (tmap $ transformMetaType f) cs) e
             (PrimitiveRecord prs) = subs selectPrimitive $ PrimitiveRecord []
-            tts                   = subs selectTimeType $ TimeRecord [] []
+            tts                   = subs selectBoundedTime $ TimeRecord [] []
             mergedmap             = merge prs (timeSubs tts)
             pred                  = buildproof (timeVars tts)
         s <- sat pred
@@ -160,28 +160,28 @@ buildproof cs =
         join $ liftM sequence_ proof
         solve []
                        
-createConstraints ss (TimeBound i1 o1,TimeBound i2 o2)
+createConstraints ss (BoundedTime i1 o1,BoundedTime i2 o2)
     =   let (s1,s2) = (ss !! i1, ss !! i2)
         in  constrain $ s1 + o1 .>= s2 + o2
-createConstraints ss (TimeBound i1 o1,TimeLiteral  o2)
+createConstraints ss (BoundedTime i1 o1,TimeLiteral  o2)
     =   let s1 = ss !! i1
         in  constrain $ s1 .>= o2
 createConstraints _ t = error $ "wrong input " ++ show t ++ " "
 
-filterVariables :: [(TimeType,TimeType)] -> [TimeType]
+filterVariables :: [(BoundedTime,BoundedTime)] -> [BoundedTime]
 filterVariables xs = nubBy equalIdentifier $ map fst xs
    where 
-   equalIdentifier (TimeBound i1 o1) (TimeBound i2 o2)
+   equalIdentifier (BoundedTime i1 o1) (BoundedTime i2 o2)
         | i1 == i2  = True
         | otherwise = False
 
-fixOrder :: [(TimeType,TimeType)] -> [(TimeType,TimeType)]
+fixOrder :: [(BoundedTime,BoundedTime)] -> [(BoundedTime,BoundedTime)]
 fixOrder = map fixOrder' -- . sort
     where
-    fixOrder' (t1@(TimeBound i1 o1), t2@(TimeBound i2 o2))
+    fixOrder' (t1@(BoundedTime i1 o1), t2@(BoundedTime i2 o2))
         | i1 < i2   = (t1,t2)
         | otherwise = (t2,t1)
-    fixOrder' (t1@(TimeLiteral o2), t2@(TimeBound i1 o1)) = (t2,t1)
+    fixOrder' (t1@(TimeLiteral o2), t2@(BoundedTime i1 o1)) = (t2,t1)
     fixOrder' (t1,t2) = (t1,t2)
 
 -- merges timed types with primitive types. Substitutions
@@ -196,14 +196,14 @@ merge = zipWith (ftuple merge')
             | x == y = Var x
             | otherwise = error "Var x /= Var y in merging types"
         merge' (Arrow x1 x2) (Arrow y1 y2) = Arrow (merge' x1 y1) (merge' x2 y2)
-        merge' (Constant x) (Constant y) = Constant $ BoundType x y
+        merge' (Constant x) (Constant y) = Constant $ BoundedType x y
         merge' x y = error $ "merging " ++ show x ++ " and " ++ show y
 
 splitLiterals = partition isBoundTimeVar
     where 
         -- only select the items which bind a time variable to a literal
-        isBoundTimeVar (TimeLiteral _, TimeBound _ _) = True
-        isBoundTimeVar (TimeBound _ _, TimeLiteral _) = True
+        isBoundTimeVar (TimeLiteral _, BoundedTime _ _) = True
+        isBoundTimeVar (BoundedTime _ _, TimeLiteral _) = True
         isBoundTimeVar _                                = False
 
 unify :: (Show a, Substitutable z a) => [Constraint a] -> z -> z
@@ -237,14 +237,14 @@ filterOutputs = uncurry (++) . filterOutputs' . unzip
 isArrow (Arrow _ _) = True
 isArrow _           = False 
         
-filterOutput :: MetaType TimeType -> Maybe (TimeType)
+filterOutput :: MetaType BoundedTime -> Maybe (BoundedTime)
 filterOutput t = 
     case t of 
         Arrow x y  -> filterOutput y
         Var _      -> Nothing
         Constant x -> Just x
 
-constraints :: Term -> State TypeState (MetaType BoundType)
+constraints :: Term -> State TypeState (MetaType BoundedType)
 constraints tm = case tm of
 
     TmAbs str tm ->
@@ -291,25 +291,25 @@ constraints tm = case tm of
 
     TmTime ptm ctm -> 
         do  nv <- freshTypeVar
-            let ct = Constant $ BoundType (typePTerm ptm) (typeCTerm ctm)
+            let ct = Constant $ BoundedType (typePTerm ptm) (typeCTerm ctm)
             addTypeConstraints [(nv,ct)]
             return nv
 
 -- Bind the type, which may include an unbound time quantifier
 -- to a specific time quantifier 
--- in other words: switch the DeBruijn index used in (TimeUnbound db offset) 
+-- in other words: switch the DeBruijn index used in (UnboundedTime db offset) 
 -- to the actual time quantifier used
-bindType :: MetaType UnboundType -> State TypeState (MetaType BoundType)
+bindType :: MetaType UnboundedType -> State TypeState (MetaType BoundedType)
 bindType t = case t of
-    Var db                          -> context2BoundType db 
+    Var db                          -> context2BoundedType db 
     Arrow t1 t2                     ->  do  ty1 <- bindType t1
                                             ty2 <- bindType t2
                                             return $ Arrow ty1 ty2
-    Constant (UnboundType pt tt)    -> case tt of
-        TimeUnbound db o ->  
-            do  ty <- context2BoundType db
+    Constant (UnboundedType pt tt)    -> case tt of
+        UnboundedTime db o ->  
+            do  ty <- context2BoundedType db
                 case ty of 
-                    (Var i) -> return $ Constant $ BoundType pt $ TimeBound i o
+                    (Var i) -> return $ Constant $ BoundedType pt $ BoundedTime i o
                     _       -> error "cant bind time to non-variable"
 
 -- Calculate the constraints of a let binding
@@ -340,7 +340,7 @@ var2Type k =
     do  (_,bind) <- index2Name k
         case bind of 
             TyScheme t  -> liftM fst $ instantiatePoly t []
-            _           -> context2BoundType k
+            _           -> context2BoundedType k
 
 -- Instantiating a polymorphic type into a specifc type involves
 -- changing all free variables in new variables that can be bound to a specific
@@ -348,16 +348,16 @@ var2Type k =
 -- need to change to Y, not X_1 |-> Y and X_2 |-> Z. To do so I use a list of 
 -- replacements.
 instantiatePoly 
-    :: MetaType BoundType -> [(MetaType BoundType,MetaType BoundType)] 
-    -> State TypeState (MetaType BoundType,[(MetaType BoundType,MetaType BoundType)])
+    :: MetaType BoundedType -> [(MetaType BoundedType,MetaType BoundedType)] 
+    -> State TypeState (MetaType BoundedType,[(MetaType BoundedType,MetaType BoundedType)])
 instantiatePoly t replaced = 
     case t of
         Arrow t1 t2   ->  do  (ty1,tr1) <- instantiatePoly t1 replaced
                               (ty2,tr2) <- instantiatePoly t2 (replaced ++ tr1)
                               return (Arrow ty1 ty2,tr1++tr2)
-        Constant (BoundType pt tt) -> 
+        Constant (BoundedType pt tt) -> 
             case tt of
-                TimeBound i o -> instantiateTimeType i o pt replaced
+                BoundedTime i o -> instantiateBoundedTime i o pt replaced
                 _               -> return (t,[])
 
         -- We can only replace if it wasn't replaced before and the context does not
@@ -372,12 +372,12 @@ instantiatePoly t replaced =
                             Nothing ->  do nv <- freshTypeVar
                                            return (nv,[(t,nv)])
 
-instantiateTimeType b o pt replaced = 
+instantiateBoundedTime b o pt replaced = 
     do  let replacement = lookup (Var b) replaced
         case replacement of
-            Just (Var i) -> return (Constant $ BoundType pt $ (TimeBound i o) , [])
+            Just (Var i) -> return (Constant $ BoundedType pt $ (BoundedTime i o) , [])
             Nothing        -> do  sv <- simpleTimeVar
-                                  let t'      = Constant $ BoundType pt (TimeBound sv o)
+                                  let t'      = Constant $ BoundedType pt (BoundedTime sv o)
                                       replace = (Var b, Var sv)
                                   return (t', [replace]) 
 
@@ -390,13 +390,13 @@ b0 = TmTime (TmBool True) (TmOffset 0)
 b1 = TmTime (TmBool True) (TmOffset 1)
 
 delay = TmTAbs "n" $ TmAs (TmAbs "x" (TmVar 0)) $ 
-        Arrow (Constant $ UnboundType TyBool (TimeUnbound 1 0)) 
-        (Constant $ UnboundType TyBool (TimeUnbound 1 1))
+        Arrow (Constant $ UnboundedType TyBool (UnboundedTime 1 0)) 
+        (Constant $ UnboundedType TyBool (UnboundedTime 1 1))
 
 f = TmTAbs "n" $ TmAs (TmAbs "x" $ TmAbs "y" (TmVar 0)) $ 
-        Arrow (Constant $ UnboundType TyBool (TimeUnbound 2 0)) 
-        (Arrow (Constant $ UnboundType TyBool (TimeUnbound 2 1)) 
-        (Constant $ UnboundType TyBool (TimeUnbound 2 2)))
+        Arrow (Constant $ UnboundedType TyBool (UnboundedTime 2 0)) 
+        (Arrow (Constant $ UnboundedType TyBool (UnboundedTime 2 1)) 
+        (Constant $ UnboundedType TyBool (UnboundedTime 2 2)))
 
 g = (TmApp (TmApp f (TmApp delay b0)) (TmApp delay b0))
 h = (TmApp (TmApp f (TmApp delay b0)) b0)

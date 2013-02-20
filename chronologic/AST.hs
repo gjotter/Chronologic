@@ -7,13 +7,13 @@ import Data.SBV
 
 type Context = [(String,Binding)]
 type LetBind = [(String,Term)]
-type AtUnbound  = [(TimeUnbound,Term)]
-type AtBound    = [(TimeType,Term)]
+type AtUnbound  = [(UnboundedTime,Term)]
+type AtBound    = [(BoundedTime,Term)]
 
 data Binding = NameBind
-             | VarBind (MetaType BoundType)
-             | TyVarBind (MetaType BoundType)
-             | TyScheme (MetaType BoundType)
+             | VarBind (MetaType BoundedType)
+             | TyVarBind (MetaType BoundedType)
+             | TyScheme (MetaType BoundedType)
              deriving Show
 
 data MetaType a = Arrow (MetaType a) (MetaType a)
@@ -21,10 +21,10 @@ data MetaType a = Arrow (MetaType a) (MetaType a)
                 | Constant a
                 deriving (Eq,Show)
 
-data BoundType = BoundType PrimitiveType TimeType
+data BoundedType = BoundedType PrimitiveType BoundedTime
           deriving (Eq,Show)
 
-data UnboundType = UnboundType PrimitiveType TimeUnbound
+data UnboundedType = UnboundedType PrimitiveType UnboundedTime
           deriving (Eq,Show)
 
 data PrimitiveType 
@@ -32,12 +32,12 @@ data PrimitiveType
     | TyInt
     deriving (Eq,Show)
 
-data TimeType 
-    = TimeBound TimeVariableIndex Offset
+data BoundedTime
+    = BoundedTime TimeVariableIndex Offset
     | TimeLiteral Offset
     deriving (Show, Eq)
 
-data TimeUnbound = TimeUnbound DeBruijn Offset
+data UnboundedTime = UnboundedTime DeBruijn Offset
                  deriving (Eq,Show)
 
 type TimeVariableIndex = Int
@@ -49,7 +49,7 @@ data Term = TmVar DeBruijn
           | TmAbs String Term
           | TmTAbs String Term
           | TmApp Term Term  
-          | TmAs Term (MetaType UnboundType)
+          | TmAs Term (MetaType UnboundedType)
           | TmAdd Term Term
           | TmIf Term Term Term
           | TmLet LetBind Term
@@ -68,16 +68,16 @@ data PrimitiveTerm = TmBool Bool
 data TimeTerm = TmOffset Offset
     deriving (Eq,Show)
 
-mapTyC :: (TimeType -> TimeType) -> MetaType BoundType -> MetaType BoundType
+mapTyC :: (BoundedTime -> BoundedTime) -> MetaType BoundedType -> MetaType BoundedType
 mapTyC f t =
     case t of
         Arrow t1 t2                -> Arrow (f `mapTyC` t1) (f `mapTyC` t2)
-        Constant (BoundType pt tt) -> Constant $ BoundType pt (f tt)
+        Constant (BoundedType pt tt) -> Constant $ BoundedType pt (f tt)
         Var v                      -> Var v
 
 emptyContext = []
 
-ctx2Type :: Context -> DeBruijn -> MetaType BoundType
+ctx2Type :: Context -> DeBruijn -> MetaType BoundedType
 ctx2Type ctx db = 
     let (_,bind) = index2name ctx db
     in case bind of
