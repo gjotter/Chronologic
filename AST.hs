@@ -11,7 +11,7 @@ data Context = Context
              , schemeBind   :: [SchemeBinding]
              }
 
-type LetBind = [(String,Term)]
+type LetBind    = [(String,Term)]
 type AtUnbound  = [(UnboundedTime,Term)]
 type AtBound    = [(BoundedTime,Term)]
 

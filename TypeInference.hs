@@ -8,7 +8,6 @@ import Control.Monad.State
 import Data.List
 import Data.SBV
 import Debug.Trace
-import qualified Data.IntervalMap.Interval as I
 
 type Constraint a = (MetaType a, MetaType a)
 type Substitution a = (MetaType a, MetaType a)
@@ -35,15 +34,18 @@ data TimeRecord = TimeRecord
                 { timeSubs :: [Substitution BoundedTime]
                 , timeVars :: [(BoundedTime,BoundedTime)] }
 
+-- Substitutable typeclass to allow a single unification algorithm on
+-- both time variables as regular type variables
 class Eq a => Substitutable z a where
     add :: Substitution a -> z -> z
     apply :: ([Substitution a] -> [Substitution a]) -> z -> z 
     match :: MetaType a -> MetaType a -> z -> z 
 
+-- TODO: this should/could probably be done a lot more elegantly and readable..
 instance Substitutable TimeRecord BoundedTime where
     add x tr = tr { timeSubs = x : (timeSubs tr) }
     apply f tr = tr { timeSubs = f $ timeSubs tr }
-    match (Constant x) (Constant y) tr = let maysub = matchConstantType x y
+    match (Constant x) (Constant y) tr = let maysub = matchConstantType x y 
                                          in case maysub of
                                                 Just z -> tr { timeVars = z : (timeVars tr)}
                                                 Nothing -> tr
@@ -66,7 +68,7 @@ instance Substitutable PrimitiveRecord PrimitiveType where
     apply f (PrimitiveRecord xs) = PrimitiveRecord $ f xs
     match (Constant x) (Constant y) tr 
         | x == y = tr
-        | otherwise = error "x /= y"
+        | otherwise = error $ show x ++ " /= " ++ show y
 
 -- Replace either type variables or concrete types when matched
 (|->) :: Eq a => MetaType a -> MetaType a -> [(MetaType a, MetaType a)] -> [(MetaType a,MetaType a)]
@@ -87,6 +89,7 @@ transformMetaType f (Constant t)  = Constant $ f t
 
 emptyState = TypeState (Context [] [] []) [] [] 0 0
 
+-- Some useful functions for modifying the typestate
 simpleTimeVar :: State TypeState Int
 simpleTimeVar = 
     do  i <- gets uniqueTimeVar
@@ -114,7 +117,8 @@ freshTimeVar =
 deBruijn2Var :: (Show a, Show b) => (Context -> [(a,b)]) -> Int -> State TypeState b
 deBruijn2Var f i = 
     do  ctx <- gets context
-        return $ snd (index2name (f ctx) i)
+        let binding = index2name (f ctx) i
+        return $ snd binding
 
 addTypeVarBinding :: TypeVarBinding -> State TypeState ()
 addTypeVarBinding c = 
@@ -134,8 +138,6 @@ addTimeVarBinding c =
         let ctx' = ctx { timeVarBind = c : timeVarBind ctx }
         modify (\s -> s { context = ctx' })
 
-
-
 addTypeConstraints :: [Constraint BoundedType] -> State TypeState ()
 addTypeConstraints c =
     do  constr <- gets typeconstraints
@@ -153,6 +155,8 @@ printTypeMap cs =
 
 printTimeSat = (liftM fst) . typecheck
 
+-- Typecheck: unify both primitive types and timed types separately, then
+-- merge the two and build a proof of the time variables.
 typecheck cs = 
     do  let subs f e              = unify (map (tmap $ transformMetaType f) cs) e
             (PrimitiveRecord prs) = subs selectPrimitive $ PrimitiveRecord []
@@ -166,16 +170,17 @@ buildproof cs =
     do  let ordtimevars           = fixOrder cs
             numtimevars           = length $ filterVariables ordtimevars
             proof                 = do syms <- mkExistVars numtimevars
+                                       mapM_ (\s -> constrain $ s .>= 0) syms
                                        return $ map (createConstraints syms) ordtimevars
         join $ liftM sequence_ proof
         solve []
                        
 createConstraints ss (BoundedTime i1 o1,BoundedTime i2 o2)
     =   let (s1,s2) = (ss !! i1, ss !! i2)
-        in  constrain $ s1 + o1 .>= s2 + o2
+        in  trace ("constrain " ++ show i1 ++ "+" ++ show o1 ++ " <= " ++ show i2 ++ "+" ++ show o2) $ constrain $ s1 + o1 .<= s2 + o2
 createConstraints ss (BoundedTime i1 o1,TimeLiteral  o2)
     =   let s1 = ss !! i1
-        in  constrain $ s1 .>= o2
+        in  trace ("constrain " ++ show i1 ++ "+" ++ show o1 ++ " >= " ++ show o2) $ constrain $ s1 + o1 .>= o2
 createConstraints _ t = error $ "wrong input " ++ show t ++ " "
 
 filterVariables :: [(BoundedTime,BoundedTime)] -> [BoundedTime]
@@ -216,6 +221,7 @@ splitLiterals = partition isBoundTimeVar
         isBoundTimeVar (BoundedTime _ _, TimeLiteral _) = True
         isBoundTimeVar _                                = False
 
+-- Unification of a substitutable, leading to a set of contraints
 unify :: (Show a, Substitutable z a) => [Constraint a] -> z -> z
 unify [] r = id r
 unify (c:cs) r = case c of
@@ -254,16 +260,19 @@ filterOutput t =
         Var _      -> Nothing
         Constant x -> Just x
 
+-- Calculate constraints of term tm in the state
 constraints :: Term -> State TypeState (MetaType BoundedType)
 constraints tm = case tm of
 
     TmAbs str tm ->
         do  nvlam <- freshTypeVar
-            addTypeVarBinding (str,nvlam)
             nvtot <- freshTypeVar
-            ty <- constraints tm
+            ctx   <- gets context 
+            addTypeVarBinding (str,nvlam)
+            ty    <- constraints tm
+            modify (\s -> s { context = ctx })
             addTypeConstraints [(nvtot,Arrow nvlam ty)]
-            return nvtot
+            trace (show $ typeVarBind ctx) $ return nvtot
  
     TmTAbs str tm ->
         do  nv <- freshTimeVar
@@ -271,8 +280,8 @@ constraints tm = case tm of
             constraints tm 
 
     TmApp t1 t2 ->
-        do  ty1 <- constraints t1
-            ty2 <- constraints t2
+        do  ty2 <- constraints t2
+            ty1 <- constraints t1
             nv <- freshTypeVar
             addTypeConstraints [(ty1,Arrow ty2 nv)]
             return nv
@@ -288,12 +297,24 @@ constraints tm = case tm of
             ty2 <- constraints t2
             nv <- freshTypeVar
             addTypeConstraints [(ty1,nv)]
-            addTypeConstraints [(nv,ty2)]
+            addTypeConstraints [(ty2,nv)]
             return nv
+
+    TmIf t1 t2 t3 ->
+        do  ty1 <- constraints t1
+            ty2 <- constraints t2
+            ty3 <- constraints t3
+            ntv <- simpleTimeVar
+            let booltype = Constant $ BoundedType TyBool (BoundedTime ntv 0)
+            addTimeVarBinding ("ifbind",booltype)
+            addTypeConstraints [(ty2,ty3)]
+            addTypeConstraints [(ty1,booltype)]
+            return ty2
 
     TmTypeVar k -> 
         do  ty <- deBruijn2Var typeVarBind k
-            return ty
+            ctx <- gets context
+            trace ("Var " ++ show k ++ ":" ++ (show $ typeVarBind ctx)) $ return ty
 
     TmTimeVar k ->
         do  ti <- deBruijn2Var timeVarBind k
@@ -390,17 +411,24 @@ instantiateBoundedTime b o pt replaced =
                                       replace = (Var b, Var sv)
                                   return (t', [replace]) 
 
+-- Some example terms, these should probably go somewhere else
 typePTerm (TmBool _)    = TyBool
 typePTerm (TmInt _)     = TyInt
 
 typeCTerm (TmOffset o) = TimeLiteral o
 
 b0 = TmTime (TmBool True) (TmOffset 0)
+i0 = TmTime (TmInt 42) (TmOffset 0)
 b1 = TmTime (TmBool True) (TmOffset 1)
 
 delay = TmTAbs "n" $ TmAs (TmAbs "x" (TmTypeVar 0)) $ 
         Arrow (Constant $ UnboundedType TyBool (UnboundedTime 0 0)) 
         (Constant $ UnboundedType TyBool (UnboundedTime 0 1))
+
+delayI = TmTAbs "t" $ TmAs (TmAbs "xd" (TmTypeVar 0)) $ 
+        Arrow (Constant $ UnboundedType TyInt (UnboundedTime 0 0)) 
+        (Constant $ UnboundedType TyInt (UnboundedTime 0 3))
+
 
 f = TmTAbs "n" $ TmAs (TmAbs "x" $ TmAbs "y" (TmTypeVar 0)) $ 
         Arrow (Constant $ UnboundedType TyBool (UnboundedTime 0 0)) 
@@ -408,9 +436,27 @@ f = TmTAbs "n" $ TmAs (TmAbs "x" $ TmAbs "y" (TmTypeVar 0)) $
         (Constant $ UnboundedType TyBool (UnboundedTime 0 2)))
 
 g = (TmApp (TmApp f (TmApp delay b0)) (TmApp delay b0))
-h = (TmApp (TmApp f (TmApp delay b0)) b0)
+h = TmAbs "x" $ TmApp (TmApp f (TmApp delay (TmTypeVar 0))) (TmTypeVar 0)
+k = TmAbs "x" $ TmApp h g
+
+sel = TmTAbs "t" $ TmAs  (TmAbs "p" $ TmAbs "x" $ TmAbs "y" $ (TmIf (TmTypeVar 2) (TmTypeVar 1) (TmTypeVar 0)))
+                      (Arrow (Constant $ UnboundedType TyBool (UnboundedTime 0 0))
+                            (Arrow (Constant $ UnboundedType TyInt (UnboundedTime 0 0))
+                                   (Arrow   (Constant $ UnboundedType TyInt (UnboundedTime 0 1))
+                                            (Constant $ UnboundedType TyInt (UnboundedTime 0 2)))))
+
+comp  = TmAbs "pe" $ TmAbs "xe" $ TmApp (TmApp (TmApp sel (TmTypeVar 1)) (TmTypeVar 0)) (TmApp delayI (TmTypeVar 0))
+comp' = TmAbs "pe" $ TmAbs "xe" $ TmApp (TmApp (TmApp sel (TmTypeVar 1)) (TmApp delayI (TmTypeVar 0))) (TmTypeVar 0)
+
+compcomp = TmAbs "p" $ TmAbs "x" $ TmApp (TmApp (TmApp sel (TmTypeVar 1)) (TmApp (TmApp comp (TmTypeVar 1)) (TmTypeVar 0))) (TmApp (TmApp comp' (TmTypeVar 1)) (TmTypeVar 0))
+
+comp2 = TmAbs "pe" $ TmAbs "xe" $ TmApp (TmApp (TmApp sel (TmTypeVar 1)) (TmApp (TmApp (TmApp sel (TmTypeVar 1)) (TmTypeVar 0)) (TmApp delayI (TmTypeVar 0)))) (TmTypeVar 0)--(TmApp delayI (TmTypeVar 0))) (TmApp delayI (TmTypeVar 0))
+compt = TmApp (TmApp comp b0) i0 
 
 testcsg= fst $ runState (constraints g >> gets typeconstraints) emptyState
 testcsg'= fst $ runState (constraints g) emptyState
 testcsh = fst $ runState (constraints h >> gets typeconstraints) emptyState
 testcsh' = fst $ runState (constraints h) emptyState
+testcsk = fst $ runState (constraints k >> gets typeconstraints) emptyState
+
+
